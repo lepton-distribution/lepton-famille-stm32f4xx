@@ -1,0 +1,45 @@
+{
+  "nom": "stm32f4xx",
+  "type": "famille",
+  "version": "1.0.0",
+  "description": "Famille STM32F4 : couche Lepton (GPIO, UART, Ethernet, pilotes dev_stm32f4xx), SPL ST (driverlib), CMSIS device ST, table de vecteurs du STM32F429/F439. cubemx_hal_driver et les pilotes non listés ne sont pas compilés.",
+  "destination": "kernel/dev/arch/cortexm/stm32f4xx",
+  "bibliotheque": "kernel",
+  "sources": [
+    "gpio.c",
+    "uart.c",
+    "eth.c",
+    "dev_stm32f4xx/dev_stm32f4xx_uart_x.c",
+    "dev_stm32f4xx/dev_stm32f4xx_eth.c",
+    "driverlib/misc.c",
+    "driverlib/stm32f4xx_rcc.c",
+    "driverlib/stm32f4xx_gpio.c",
+    "driverlib/stm32f4xx_usart.c",
+    "driverlib/stm32f4xx_dma.c",
+    "driverlib/stm32f4xx_syscfg.c",
+    "driverlib/stm32f4x7_eth.c"
+  ],
+  "dependances": [
+    "lepton-noyau"
+  ],
+  "coeurs": [
+    "cortex-m4f"
+  ],
+  "mcu": [
+    "STM32F429xx"
+  ],
+  "vecteurs": [
+    "vecteurs/stm32f429xx_vectors.c"
+  ],
+  "compilation": {
+    "publique": {
+      "definitions": [
+        "USE_STDPERIPH_DRIVER"
+      ],
+      "inclusions": [
+        "kernel/dev/arch/cortexm/stm32f4xx/driverlib",
+        "kernel/dev/arch/cortexm/stm32f4xx/dev_stm32f4xx"
+      ]
+    }
+  }
+}
