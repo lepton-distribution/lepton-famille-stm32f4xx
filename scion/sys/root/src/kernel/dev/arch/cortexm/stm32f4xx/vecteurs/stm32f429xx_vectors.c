@@ -1,5 +1,5 @@
 /*
- * Lepton — vecteurs d'interruption du STM32F429/F439 (NUCLEO-F439ZI, étape 5).
+ * Lepton — vecteurs d'interruption du STM32F429/F439 (famille stm32f4xx ; étape 5, ENV-6).
  * Licence : voir LICENSE (MPL 1.1).
  *
  * Le démarrage générique ARMv7-M (kernel/core/arch/cortexm/startup_armv7m.c) fournit la table
