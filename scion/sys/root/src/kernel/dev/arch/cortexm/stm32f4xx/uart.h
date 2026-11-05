@@ -59,11 +59,12 @@ typedef struct __lepton_packed
 typedef struct __lepton_packed
 {
   USART_TypeDef *UARTx;
-  void (*RCC_APBxPeriphClockCmd)(uint32_t, FunctionalState);
-  u32 RCC_APBxPeriph;
+  volatile uint32_t *RCC_APBxENR;    /* &RCC->APB1ENR ou &RCC->APB2ENR (ENV-35 : sans SPL) */
+  volatile uint32_t *RCC_APBxRSTR;   /* &RCC->APB1RSTR ou &RCC->APB2RSTR */
+  u32 RCC_APBxPeriph;                /* bit de l'USART dans ces deux registres */
   IRQn_Type IRQn;
   DMA_Stream_TypeDef *DMAy_Streamx;
-  u32 DMA_Channel;
+  u32 DMA_Channel;                   /* champ CHSEL de DMA_SxCR : UART_DMA_CHANNEL(n) */
   IRQn_Type DMAx_IRQn;
   const _Gpio_Descriptor *TxGpio;
   const _Gpio_Descriptor *RxGpio;
@@ -79,6 +80,9 @@ typedef struct __lepton_packed
 #define UART_HW_FLOW_CTRL_RX    0x01
 #define UART_HW_FLOW_CTRL_TX    0x02
 #define UART_HALF_DUPLEX        0x04
+
+/* canal n (0-7) du flux DMA de reception, champ CHSEL de DMA_SxCR (RM0090 10.5.5) */
+#define UART_DMA_CHANNEL(n)     ((u32)(n) << DMA_SxCR_CHSEL_Pos)
 
 /* Exported macro ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
