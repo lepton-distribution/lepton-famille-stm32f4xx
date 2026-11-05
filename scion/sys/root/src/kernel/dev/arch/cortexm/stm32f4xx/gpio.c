@@ -27,7 +27,9 @@ either the MPL or the [eCos GPL] License."
 
 
 /* Includes ------------------------------------------------------------------*/
-#include "kernel/dev/arch/cortexm/stm32f4xx/driverlib/stm32f4xx.h"
+#include "kernel/core/kernelconf.h"   /* configuration de carte (_GPIO_DEFAULT_SPEED), incluse par
+                                       driverlib/stm32f4xx.h jusqu'a ENV-35 */
+#include "stm32f4xx_hal.h"   /* HAL STM32F4 (GPIO), ENV-35 : remplace la SPL (driverlib) */
 #include "kernel/core/compiler.h"
 #include "kernel/dev/arch/cortexm/stm32f4xx/types.h"
 #include "kernel/dev/arch/cortexm/stm32f4xx/gpio.h"
@@ -92,10 +94,13 @@ void gpio_startup_init(void)
 void gpio_set_mode(const _Gpio_Descriptor *Gpio, u32 Mode, u8 Val)
 {
   GPIO_InitTypeDef gpio_init_structure;
+  GPIO_TypeDef *port;
   _Gpio_Mode mode;
+  u8 pos = 0;
 
   if (!Gpio) return;
   mode.Val = Mode;
+
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio))
     {
@@ -104,14 +109,35 @@ void gpio_set_mode(const _Gpio_Descriptor *Gpio, u32 Mode, u8 Val)
       return;
     }
   #endif
-  gpio_init_structure.GPIO_Pin  = Gpio->GPIO_Pin;
-  if (mode.SetSpeed) gpio_init_structure.GPIO_Speed = (GPIOSpeed_TypeDef)mode.Speed;
-  else gpio_init_structure.GPIO_Speed = _GPIO_DEFAULT_SPEED;
-  gpio_init_structure.GPIO_Mode = (GPIOMode_TypeDef)mode.Function;
-  gpio_init_structure.GPIO_OType = (GPIOOType_TypeDef)mode.Type;
-  gpio_init_structure.GPIO_PuPd = (GPIOPuPd_TypeDef)mode.PuPd;
-  GPIO_Init((GPIO_TypeDef *)Gpio->Port, &gpio_init_structure);
-  if (gpio_is_output(&mode)) GPIO_WriteBit((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin, (BitAction)Val);
+
+  /* Champs du mode Lepton = valeurs des registres (MODER, OTYPER, PUPDR, OSPEEDR), comme pour la
+     SPL : traduits en mode HAL. La fonction alternative choisie par gpio_set_function (AFR) est
+     conservee : HAL_GPIO_Init la reecrit en mode AF. */
+  port = (GPIO_TypeDef *)Gpio->Port;
+  while (pos < 15 && !(Gpio->GPIO_Pin & (1u << pos))) pos++;
+  gpio_init_structure.Pin = Gpio->GPIO_Pin;
+  switch (mode.Function)
+  {
+    case GPIO_FCT_OUT:
+      gpio_init_structure.Mode = mode.Type ? GPIO_MODE_OUTPUT_OD : GPIO_MODE_OUTPUT_PP;
+      break;
+    case GPIO_FCT_AF:
+      gpio_init_structure.Mode = mode.Type ? GPIO_MODE_AF_OD : GPIO_MODE_AF_PP;
+      break;
+    case GPIO_FCT_AN:
+      gpio_init_structure.Mode = GPIO_MODE_ANALOG;
+      break;
+    default:
+      gpio_init_structure.Mode = GPIO_MODE_INPUT;
+      break;
+  }
+  gpio_init_structure.Pull = mode.PuPd;
+  if (mode.SetSpeed) gpio_init_structure.Speed = mode.Speed;
+  else gpio_init_structure.Speed = _GPIO_DEFAULT_SPEED;
+  gpio_init_structure.Alternate = (port->AFR[pos >> 3] >> ((pos & 7u) * 4u)) & 0xFu;
+  HAL_GPIO_Init(port, &gpio_init_structure);
+  if (gpio_is_output(&mode))
+    HAL_GPIO_WritePin(port, Gpio->GPIO_Pin, Val ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 /*******************************************************************************
@@ -139,9 +165,9 @@ void gpio_set(const _Gpio_Descriptor *Gpio)
   if (!Gpio) return;
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio)) i2cio_set_output(Gpio->Port, Gpio->GPIO_Pin, 1);
-    else GPIO_SetBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    else HAL_GPIO_WritePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin, GPIO_PIN_SET);
   #else
-    GPIO_SetBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    HAL_GPIO_WritePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin, GPIO_PIN_SET);
   #endif
 }
 
@@ -157,9 +183,9 @@ void gpio_reset(const _Gpio_Descriptor *Gpio)
   if (!Gpio) return;
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio)) i2cio_set_output(Gpio->Port, Gpio->GPIO_Pin, 0);
-    else GPIO_ResetBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    else HAL_GPIO_WritePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin, GPIO_PIN_RESET);
   #else
-    GPIO_ResetBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    HAL_GPIO_WritePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin, GPIO_PIN_RESET);
   #endif
 }
 
@@ -175,9 +201,9 @@ void gpio_toggle(const _Gpio_Descriptor *Gpio)
   if (!Gpio) return;
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio)) i2cio_toggle_output(Gpio->Port, Gpio->GPIO_Pin);
-    else GPIO_ToggleBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    else HAL_GPIO_TogglePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
   #else
-    GPIO_ToggleBits((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
+    HAL_GPIO_TogglePin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin);
   #endif
 }
 
@@ -194,7 +220,7 @@ u8 gpio_read(const _Gpio_Descriptor *Gpio)
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio)) return(i2cio_read_register_bit(Gpio->Port, I2CIO_REG_INPUT, Gpio->GPIO_Pin));
   #endif
-  return(GPIO_ReadInputDataBit((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin));
+  return((u8)HAL_GPIO_ReadPin((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin));
 }
 
 /*******************************************************************************
@@ -210,7 +236,7 @@ u8 gpio_read_output(const _Gpio_Descriptor *Gpio)
   #ifdef _GPIO_I2CIO_SUPPORT
     if (gpio_is_i2c(Gpio)) return(i2cio_read_register_bit(Gpio->Port, I2CIO_REG_OUTPUT, Gpio->GPIO_Pin));
   #endif
-  return(GPIO_ReadOutputDataBit((GPIO_TypeDef *)Gpio->Port, Gpio->GPIO_Pin));
+  return((((GPIO_TypeDef *)Gpio->Port)->ODR & Gpio->GPIO_Pin) ? 1 : 0);   /* pas d'equivalent HAL */
 }
 
 /*******************************************************************************
@@ -226,7 +252,10 @@ void gpio_set_function(const _Gpio_Descriptor *Gpio, u8 Function)
   u8 i = 0;
 
   while ((1 << i) < Gpio->GPIO_Pin) i++;
-  GPIO_PinAFConfig((GPIO_TypeDef *)Gpio->Port, i, Function);
+  /* AFR[i/8], champ de 4 bits (RM0090 8.4.9-10) ; pas d'equivalent HAL hors HAL_GPIO_Init */
+  GPIO_TypeDef *port = (GPIO_TypeDef *)Gpio->Port;
+  port->AFR[i >> 3] = (port->AFR[i >> 3] & ~(0xFu << ((i & 7u) * 4u)))
+                      | ((u32)Function << ((i & 7u) * 4u));
 }
 
 // /*******************************************************************************

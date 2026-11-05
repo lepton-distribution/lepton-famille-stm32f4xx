@@ -61,8 +61,8 @@ either the MPL or the [eCos GPL] License."
 #define GPIO_MODE_OUT_PP  0x00000001
 #define GPIO_MODE_OUT_OD  0x00000101
 #define GPIO_MODE_AF      0x00000002
-#define GPIO_MODE_AF_PP   0x00000002
-#define GPIO_MODE_AF_OD   0x00000102
+/* GPIO_MODE_AF_PP et GPIO_MODE_AF_OD retires (ENV-35) : noms de la HAL (stm32f4xx_hal_gpio.h,
+   AF_OD = 0x12), inutilises par la couche Lepton ; mode Lepton AF + GPIO_TYPE_OD a la place */
 #define GPIO_MODE_AN      0x00000003
 
 enum {
