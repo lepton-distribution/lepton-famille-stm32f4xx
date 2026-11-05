@@ -2,22 +2,19 @@
   "nom": "stm32f4xx",
   "type": "famille",
   "version": "1.0.0",
-  "description": "Famille STM32F4 : couche Lepton (GPIO, UART, Ethernet, pilotes dev_stm32f4xx), SPL ST (driverlib), CMSIS device ST, table de vecteurs du STM32F429/F439. HAL ST v1.8.5 (hal_driver) et CMSIS device ST 3c77349 (cmsis-5), importés de STM32CubeF4 v1.28.3 avec leur provenance, et les pilotes non listés ne sont pas compilés.",
+  "description": "Famille STM32F4 : couche Lepton (GPIO sur la HAL, USART et DMA par registres, Ethernet dev_stm32f4xx_eth_x sur la HAL ETH, tick de la HAL), HAL ST v1.8.5 (hal_driver) et CMSIS device ST 3c77349 (cmsis-5), importés de STM32CubeF4 v1.28.3 avec leur provenance ; table de vecteurs du STM32F429/F439. Seuls les fichiers listés dans sources sont compilés ; stm32f4xx_hal_conf.h est fourni par le BSP. La SPL ST (driverlib), eth.c et dev_stm32f4xx_eth.c restent dans l'arbre, non compilés (ENV-35).",
   "destination": "kernel/dev/arch/cortexm/stm32f4xx",
   "bibliotheque": "kernel",
   "sources": [
     "gpio.c",
     "uart.c",
-    "eth.c",
     "dev_stm32f4xx/dev_stm32f4xx_uart_x.c",
-    "dev_stm32f4xx/dev_stm32f4xx_eth.c",
-    "driverlib/misc.c",
-    "driverlib/stm32f4xx_rcc.c",
-    "driverlib/stm32f4xx_gpio.c",
-    "driverlib/stm32f4xx_usart.c",
-    "driverlib/stm32f4xx_dma.c",
-    "driverlib/stm32f4xx_syscfg.c",
-    "driverlib/stm32f4x7_eth.c"
+    "dev_stm32f4xx/dev_stm32f4xx_eth_x.c",
+    "dev_stm32f4xx/dev_stm32f4xx_hal_tick.c",
+    "hal_driver/Src/stm32f4xx_hal_gpio.c",
+    "hal_driver/Src/stm32f4xx_hal_eth.c",
+    "hal_driver/Src/stm32f4xx_hal_rcc.c",
+    "hal_driver/Src/stm32f4xx_hal_cortex.c"
   ],
   "dependances": [
     "lepton-noyau"
@@ -26,7 +23,8 @@
     "cortex-m4f"
   ],
   "mcu": [
-    "STM32F429xx"
+    "STM32F429xx",
+    "STM32F439xx"
   ],
   "vecteurs": [
     "vecteurs/stm32f429xx_vectors.c"
@@ -34,11 +32,12 @@
   "compilation": {
     "publique": {
       "definitions": [
-        "USE_STDPERIPH_DRIVER"
+        "USE_HAL_DRIVER"
       ],
       "inclusions": [
-        "kernel/dev/arch/cortexm/stm32f4xx/driverlib",
-        "kernel/dev/arch/cortexm/stm32f4xx/dev_stm32f4xx"
+        "kernel/dev/arch/cortexm/stm32f4xx/dev_stm32f4xx",
+        "kernel/dev/arch/cortexm/stm32f4xx/hal_driver/Inc",
+        "kernel/core/ucore/cmsis-5/Device/ST/STM32F4xx/Include"
       ]
     }
   }

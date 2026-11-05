@@ -38,7 +38,7 @@ either the MPL or the [eCos GPL] License."
 #include "kernel/fs/vfs/vfstypes.h"
 #include "kernel/core/malloc.h"
 
-#include "kernel/dev/arch/cortexm/stm32f4xx/driverlib/stm32f4xx.h"
+#include "stm32f4xx_hal.h"   /* en-tetes CMSIS et HAL ; USART et DMA pilotes par registres (ENV-35) */
 #include "kernel/dev/arch/cortexm/stm32f4xx/types.h"
 #include "kernel/dev/arch/cortexm/stm32f4xx/gpio.h"
 #include "kernel/dev/arch/cortexm/stm32f4xx/dma.h"
@@ -61,6 +61,85 @@ either the MPL or the [eCos GPL] License."
 /* Private variables & constants ---------------------------------------------*/
 _Uart_Ctrl *Uart_Ctrl[UART_NB];
 
+/* --- USART et DMA par registres (ENV-35, sans SPL ni module UART de la HAL, comme le F7).
+   Memes reglages et memes calculs que USART_Init, USART_ChangeBaudrate, DMA_Init, DMA_DeInit et
+   RCC_GetClocksFreq de la SPL V1.0.2 employes jusque-la (RM0090 6.3, 10.5, 30.6). */
+static const u8 uart_ahb_apb_presc[16] = {0, 0, 0, 0, 1, 2, 3, 4, 1, 2, 3, 4, 6, 7, 8, 9};
+
+/* horloge APB de l'USART (USART1 et USART6 sur APB2), d'apres les registres du RCC */
+static u32 uart_apb_clock(const USART_TypeDef *UARTx)
+{
+  u32 sysclk, pllm, pllvco, pllp, hclk;
+  switch (RCC->CFGR & RCC_CFGR_SWS)
+  {
+    case RCC_CFGR_SWS_HSE:
+      sysclk = HSE_VALUE;
+      break;
+    case RCC_CFGR_SWS_PLL:
+      pllm = RCC->PLLCFGR & RCC_PLLCFGR_PLLM;
+      pllvco = ((RCC->PLLCFGR & RCC_PLLCFGR_PLLSRC) ? HSE_VALUE : HSI_VALUE) / pllm
+               * ((RCC->PLLCFGR & RCC_PLLCFGR_PLLN) >> RCC_PLLCFGR_PLLN_Pos);
+      pllp = (((RCC->PLLCFGR & RCC_PLLCFGR_PLLP) >> RCC_PLLCFGR_PLLP_Pos) + 1u) * 2u;
+      sysclk = pllvco / pllp;
+      break;
+    default:
+      sysclk = HSI_VALUE;
+      break;
+  }
+  hclk = sysclk >> uart_ahb_apb_presc[(RCC->CFGR & RCC_CFGR_HPRE) >> RCC_CFGR_HPRE_Pos];
+  if ((UARTx == USART1) || (UARTx == USART6))
+    return hclk >> uart_ahb_apb_presc[(RCC->CFGR & RCC_CFGR_PPRE2) >> RCC_CFGR_PPRE2_Pos];
+  return hclk >> uart_ahb_apb_presc[(RCC->CFGR & RCC_CFGR_PPRE1) >> RCC_CFGR_PPRE1_Pos];
+}
+
+/* BRR, calcul de la SPL (parties entiere et fractionnaire au centieme, sur-echantillonnage 8/16) */
+static void uart_set_brr(USART_TypeDef *UARTx, u32 BaudRate)
+{
+  u32 apbclock = uart_apb_clock(UARTx);
+  u32 integerdivider, fractionaldivider, tmpreg;
+  if (UARTx->CR1 & USART_CR1_OVER8) integerdivider = (25u * apbclock) / (2u * BaudRate);
+  else integerdivider = (25u * apbclock) / (4u * BaudRate);
+  tmpreg = (integerdivider / 100u) << 4;
+  fractionaldivider = integerdivider - (100u * (tmpreg >> 4));
+  if (UARTx->CR1 & USART_CR1_OVER8) tmpreg |= (((fractionaldivider * 8u) + 50u) / 100u) & 0x07u;
+  else tmpreg |= (((fractionaldivider * 16u) + 50u) / 100u) & 0x0Fu;
+  UARTx->BRR = (u16)tmpreg;
+}
+
+/* remise a zero de l'USART par le RCC (USART_DeInit) */
+static void uart_reset(const _Uart_Descriptor *Uart)
+{
+  *Uart->RCC_APBxRSTR |= Uart->RCC_APBxPeriph;
+  *Uart->RCC_APBxRSTR &= ~Uart->RCC_APBxPeriph;
+}
+
+/* interruption USART active et signalee : validation dans CR1, indicateur dans SR
+   (USART_GetITStatus) */
+static int uart_it_status(const USART_TypeDef *UARTx, u32 cr1_ie, u32 sr_flag)
+{
+  return ((UARTx->CR1 & cr1_ie) && (UARTx->SR & sr_flag)) ? 1 : 0;
+}
+
+/* validation d'une interruption USART dans CR1 (USART_ITConfig) */
+static void uart_it_config(USART_TypeDef *UARTx, u32 cr1_ie, int enable)
+{
+  if (enable) UARTx->CR1 |= cr1_ie;
+  else UARTx->CR1 &= ~cr1_ie;
+}
+
+/* flux DMA a l'etat de reset, indicateurs effaces (DMA_DeInit) */
+static void uart_dma_deinit(DMA_Stream_TypeDef *Stream)
+{
+  Stream->CR &= ~DMA_SxCR_EN;
+  Stream->CR = 0;
+  Stream->NDTR = 0;
+  Stream->PAR = 0;
+  Stream->M0AR = 0;
+  Stream->M1AR = 0;
+  Stream->FCR = 0x00000021u;
+  dma_stream_clear_flags(Stream);
+}
+
 /* Private function prototypes -----------------------------------------------*/
 /* Private functions ---------------------------------------------------------*/
 /*******************************************************************************
@@ -78,9 +157,6 @@ _Uart_Ctrl *Uart_Ctrl[UART_NB];
 *******************************************************************************/
 int uart_open (const _Uart_Descriptor *Uart, u32 BaudRate, u8 DmaBufSize, u16 RxBufSize, u16 TxBufSize, u8 HwCtrl, const _Gpio_Descriptor *Gpio)
 {
-  USART_InitTypeDef usart_init_structure;
-  DMA_InitTypeDef dma_init_structure;
-  NVIC_InitTypeDef NVIC_InitStructure;
 
   /* Init control variables and bufers */
   if (*Uart->Ctrl) _sys_free(*Uart->Ctrl);
@@ -101,7 +177,7 @@ int uart_open (const _Uart_Descriptor *Uart, u32 BaudRate, u8 DmaBufSize, u16 Rx
   #endif
 
   /* Enable peripheral clock */
-  (*Uart->RCC_APBxPeriphClockCmd)(Uart->RCC_APBxPeriph, ENABLE);
+  *Uart->RCC_APBxENR |= Uart->RCC_APBxPeriph;
 
   /* Init GPIO */
   gpio_set_function(Uart->TxGpio, Uart->GPIO_AF);
@@ -111,37 +187,38 @@ int uart_open (const _Uart_Descriptor *Uart, u32 BaudRate, u8 DmaBufSize, u16 Rx
   if ((*Uart->Ctrl)->HwCtrl & (UART_HW_FLOW_CTRL_RX | UART_HALF_DUPLEX)) gpio_set_mode((*Uart->Ctrl)->Gpio, GPIO_FCT_OUT, 0);
 
   /* Init UART peripheral */
-  USART_DeInit(Uart->UARTx);
-  USART_StructInit(&usart_init_structure);
-  usart_init_structure.USART_BaudRate = BaudRate;
-  if ((*Uart->Ctrl)->HwCtrl & UART_HW_FLOW_CTRL_TX) usart_init_structure.USART_HardwareFlowControl = USART_HardwareFlowControl_CTS;
-  USART_Init(Uart->UARTx, &usart_init_structure);
+  uart_reset(Uart);
+  /* valeurs de USART_StructInit : 8 bits, 1 bit d'arret, sans parite, emission et reception */
+  Uart->UARTx->CR2 &= ~USART_CR2_STOP;
+  Uart->UARTx->CR1 = (Uart->UARTx->CR1
+                      & ~(USART_CR1_M | USART_CR1_PCE | USART_CR1_PS | USART_CR1_TE | USART_CR1_RE))
+                     | USART_CR1_TE | USART_CR1_RE;
+  Uart->UARTx->CR3 = (Uart->UARTx->CR3 & ~(USART_CR3_CTSE | USART_CR3_RTSE))
+                     | (((*Uart->Ctrl)->HwCtrl & UART_HW_FLOW_CTRL_TX) ? USART_CR3_CTSE : 0u);
+  uart_set_brr(Uart->UARTx, BaudRate);
 
   /* Configure DMA (if used) */
   if ((*Uart->Ctrl)->DmaBufSize)
   {
-    DMA_DeInit(Uart->DMAy_Streamx);
-    DMA_StructInit(&dma_init_structure);
-    dma_init_structure.DMA_Channel = Uart->DMA_Channel;
-    dma_init_structure.DMA_PeripheralBaseAddr = (u32)&Uart->UARTx->DR;
-    dma_init_structure.DMA_Memory0BaseAddr = (u32)(*Uart->Ctrl)->DmaBufPtr;
-    dma_init_structure.DMA_BufferSize = (*Uart->Ctrl)->DmaBufSize;
-    dma_init_structure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-    dma_init_structure.DMA_Mode = DMA_Mode_Circular;
-    dma_init_structure.DMA_Priority = DMA_Priority_Medium;
-    dma_init_structure.DMA_FIFOMode = DMA_FIFOMode_Disable;
-    DMA_Init(Uart->DMAy_Streamx, &dma_init_structure);
-    DMA_ITConfig(Uart->DMAy_Streamx, DMA_IT_TC | DMA_IT_HT, ENABLE);
-    DMA_Cmd(Uart->DMAy_Streamx, ENABLE);
+    /* peripherique vers memoire, memoire incrementee, octets, circulaire, priorite moyenne,
+       sans FIFO (reglages de DMA_StructInit et d'uart_open jusqu'a ENV-35) */
+    uart_dma_deinit(Uart->DMAy_Streamx);
+    Uart->DMAy_Streamx->CR = Uart->DMA_Channel | DMA_SxCR_MINC | DMA_SxCR_CIRC | DMA_SxCR_PL_0;
+    Uart->DMAy_Streamx->FCR &= ~(DMA_SxFCR_DMDIS | DMA_SxFCR_FTH);
+    Uart->DMAy_Streamx->NDTR = (*Uart->Ctrl)->DmaBufSize;
+    Uart->DMAy_Streamx->PAR = (u32)&Uart->UARTx->DR;
+    Uart->DMAy_Streamx->M0AR = (u32)(*Uart->Ctrl)->DmaBufPtr;
+    Uart->DMAy_Streamx->CR |= DMA_SxCR_TCIE | DMA_SxCR_HTIE;
+    Uart->DMAy_Streamx->CR |= DMA_SxCR_EN;
     NVIC_EnableIRQ(Uart->DMAx_IRQn);
     //
     //NVIC_SetPriority((IRQn_Type)Uart->DMAx_IRQn, (uint32_t)129);
     NVIC_SetPriority((IRQn_Type)Uart->DMAx_IRQn, (1 << __NVIC_PRIO_BITS) -3);
     //
-    USART_DMACmd(Uart->UARTx, USART_DMAReq_Rx, ENABLE);
-    USART_ITConfig(Uart->UARTx, USART_IT_IDLE, ENABLE);
+    Uart->UARTx->CR3 |= USART_CR3_DMAR;
+    uart_it_config(Uart->UARTx, USART_CR1_IDLEIE, 1);
   }
-  else USART_ITConfig(Uart->UARTx, USART_IT_RXNE, ENABLE);
+  else uart_it_config(Uart->UARTx, USART_CR1_RXNEIE, 1);
 
   /* Enable IT and start peripheral */
   //NVIC_InitStructure.NVIC_IRQChannel = Uart->IRQn;		 // we want to configure the USART1 interrupts
@@ -154,9 +231,9 @@ int uart_open (const _Uart_Descriptor *Uart, u32 BaudRate, u8 DmaBufSize, u16 Rx
   NVIC_SetPriority((IRQn_Type)Uart->IRQn, (1 << __NVIC_PRIO_BITS) -4);
   //
    
-  USART_ITConfig(Uart->UARTx, USART_IT_TC, ENABLE);
+  uart_it_config(Uart->UARTx, USART_CR1_TCIE, 1);
   NVIC_EnableIRQ(Uart->IRQn);
-  USART_Cmd(Uart->UARTx, ENABLE);
+  Uart->UARTx->CR1 |= USART_CR1_UE;
   
   
   while (!gpio_read(Uart->TxGpio));
@@ -181,9 +258,9 @@ int uart_close(const _Uart_Descriptor *Uart)
   {
     if ((*Uart->Ctrl)->DmaBufSize)
     {
-      USART_DMACmd(Uart->UARTx, USART_DMAReq_Rx, DISABLE);
+      Uart->UARTx->CR3 &= ~USART_CR3_DMAR;
       NVIC_DisableIRQ(Uart->DMAx_IRQn);
-      DMA_DeInit(Uart->DMAy_Streamx);
+      uart_dma_deinit(Uart->DMAy_Streamx);
     }
     if (((*Uart->Ctrl)->HwCtrl & UART_HW_FLOW_CTRL_RX) || ((*Uart->Ctrl)->HwCtrl & UART_HALF_DUPLEX)) gpio_init((*Uart->Ctrl)->Gpio);
     _sys_free(*Uart->Ctrl);
@@ -191,10 +268,10 @@ int uart_close(const _Uart_Descriptor *Uart)
   }
 
   /* Deactivate UART peripheral */
-  USART_DeInit(Uart->UARTx);
+  uart_reset(Uart);
 
   /* Disable peripheral clock */
-  (*Uart->RCC_APBxPeriphClockCmd)(Uart->RCC_APBxPeriph, DISABLE);
+  *Uart->RCC_APBxENR &= ~Uart->RCC_APBxPeriph;
 
   /* Configure GPIO to default state */
   gpio_init(Uart->TxGpio);
@@ -213,7 +290,7 @@ int uart_close(const _Uart_Descriptor *Uart)
 *******************************************************************************/
 int uart_set_baudrate (const _Uart_Descriptor *Uart, u32 BaudRate){
    //
-   USART_ChangeBaudrate(Uart->UARTx,BaudRate);
+   uart_set_brr(Uart->UARTx, BaudRate);
    //
    return(0);
 }
@@ -232,17 +309,17 @@ void uart_irq_handler(const _Uart_Descriptor *Uart)
   //
   if (*Uart->Ctrl && (*Uart->Ctrl)->DmaBufSize)
   {
-    if (USART_GetITStatus(Uart->UARTx, USART_IT_IDLE) != RESET)                          // Idle line
+    if (uart_it_status(Uart->UARTx, USART_CR1_IDLEIE, USART_SR_IDLE))                          // Idle line
     {
       NVIC_SetPendingIRQ(Uart->DMAx_IRQn);
-      USART_ReceiveData(Uart->UARTx);
+      (void)Uart->UARTx->DR;   /* lecture de SR puis de DR : efface IDLE */
     }
   }
-  else if (USART_GetITStatus(Uart->UARTx, USART_IT_RXNE) != RESET)                       // Received Data Ready to be Read
+  else if (uart_it_status(Uart->UARTx, USART_CR1_RXNEIE, USART_SR_RXNE))                       // Received Data Ready to be Read
   {
     if (*Uart->Ctrl && ((*Uart->Ctrl)->RxCnt < (*Uart->Ctrl)->RxBufSize))
     {
-      (*Uart->Ctrl)->RxBufPtr[(*Uart->Ctrl)->RxiPut++] = (char)USART_ReceiveData(Uart->UARTx);
+      (*Uart->Ctrl)->RxBufPtr[(*Uart->Ctrl)->RxiPut++] = (char)(Uart->UARTx->DR & 0x1FFu);
       //lepton
       if(!(*Uart->Ctrl)->RxCnt){
         if(Uart->board_uart_info && Uart->board_uart_info->desc_r!=-1)
@@ -253,22 +330,22 @@ void uart_irq_handler(const _Uart_Descriptor *Uart)
       if ((*Uart->Ctrl)->RxiPut >= (*Uart->Ctrl)->RxBufSize) (*Uart->Ctrl)->RxiPut = 0;
       if (((*Uart->Ctrl)->HwCtrl & UART_HW_FLOW_CTRL_RX) && ((*Uart->Ctrl)->RxCnt > ((*Uart->Ctrl)->RxBufSize - (*Uart->Ctrl)->DmaBufSize))) uart_set_rx_hw_fc(Uart);
     }
-    else USART_ClearITPendingBit(Uart->UARTx, USART_IT_RXNE);
+    else Uart->UARTx->SR = (u16)~USART_SR_RXNE;
     #ifdef _UART_OS_SUPPORT
       isr_evt_set((*Uart->Ctrl)->Event, (*Uart->Ctrl)->Task);
     #endif
   }
 
-  if (USART_GetITStatus(Uart->UARTx, USART_IT_TXE) != RESET)                             // Transmit Data Register Empty
+  if (uart_it_status(Uart->UARTx, USART_CR1_TXEIE, USART_SR_TXE))                             // Transmit Data Register Empty
   {
     if (*Uart->Ctrl && (*Uart->Ctrl)->TxCnt)
     {
-      USART_SendData(Uart->UARTx, (*Uart->Ctrl)->TxBufPtr[(*Uart->Ctrl)->TxiGet++]);
+      Uart->UARTx->DR = (u16)((*Uart->Ctrl)->TxBufPtr[(*Uart->Ctrl)->TxiGet++] & 0x1FFu);
       (*Uart->Ctrl)->TxCnt--;
       if ((*Uart->Ctrl)->TxiGet >= (*Uart->Ctrl)->TxBufSize) (*Uart->Ctrl)->TxiGet = 0;
     }
     else{
-      USART_ITConfig(Uart->UARTx, USART_IT_TXE, DISABLE);
+      uart_it_config(Uart->UARTx, USART_CR1_TXEIE, 0);
       //lepton
         if(Uart->board_uart_info && Uart->board_uart_info->desc_w!=-1)
            __fire_io_int(ofile_lst[Uart->board_uart_info->desc_w].owner_pthread_ptr_write);
@@ -276,11 +353,11 @@ void uart_irq_handler(const _Uart_Descriptor *Uart)
     }
   }
 
-  if (USART_GetITStatus(Uart->UARTx, USART_IT_TC) != RESET)                              // Transmission complete
+  if (uart_it_status(Uart->UARTx, USART_CR1_TCIE, USART_SR_TC))                              // Transmission complete
   {
     if (*Uart->Ctrl && ((*Uart->Ctrl)->HwCtrl & UART_HALF_DUPLEX)) 
       uart_tx_disable(Uart);
-    USART_ClearITPendingBit(Uart->UARTx, USART_IT_TC);
+    Uart->UARTx->SR = (u16)~USART_SR_TC;
   }
   //
   __hw_leave_interrupt();
@@ -297,11 +374,10 @@ void uart_dma_irq_handler(const _Uart_Descriptor *Uart){
   //
   __hw_enter_interrupt();
   //
-  uint32_t dma_it_all_mask;
   //
   if (*Uart->Ctrl)
   {
-    while ((DMA_GetCurrDataCounter(Uart->DMAy_Streamx) != (*Uart->Ctrl)->iDma) && ((*Uart->Ctrl)->RxCnt < (*Uart->Ctrl)->RxBufSize))
+    while ((Uart->DMAy_Streamx->NDTR != (*Uart->Ctrl)->iDma) && ((*Uart->Ctrl)->RxCnt < (*Uart->Ctrl)->RxBufSize))
     {
       (*Uart->Ctrl)->RxBufPtr[(*Uart->Ctrl)->RxiPut++] = (*Uart->Ctrl)->DmaBufPtr[(*Uart->Ctrl)->DmaBufSize - (*Uart->Ctrl)->iDma--];
       if (!(*Uart->Ctrl)->iDma) (*Uart->Ctrl)->iDma = (*Uart->Ctrl)->DmaBufSize;
@@ -331,45 +407,8 @@ void uart_dma_irq_handler(const _Uart_Descriptor *Uart){
   //for  bret interface usart1
   //DMA_ClearITPendingBit(Uart->DMAy_Streamx,DMA_IT_ALL_2);
   
-   //fix here
-#if 1
-   switch( ((uint32_t)(Uart->DMAy_Streamx)) & ((uint32_t)(0x000000FF)) ){
-      //
-      case (DMA1_Stream0_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_0;
-      break;
-      //
-      case (DMA1_Stream1_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_1;
-      break;
-      //
-      case (DMA1_Stream2_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_2;
-      break;
-      //
-      case (DMA1_Stream3_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_3;
-      break;         
-      //
-      case (DMA1_Stream4_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_4;
-      break;
-      //
-      case (DMA1_Stream5_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_5;
-      break;
-      //
-      case (DMA1_Stream6_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_6;
-      break;
-      //
-      case (DMA1_Stream7_BASE&0x000000FF):
-         dma_it_all_mask = DMA_IT_ALL_7;
-      break;      
-   }
-   //
-   DMA_ClearITPendingBit(Uart->DMAy_Streamx,dma_it_all_mask);
-#endif
+   //fix here (ENV-35 : indicateurs du flux calcules d'apres son adresse, DMA1 ou DMA2)
+   dma_stream_clear_flags(Uart->DMAy_Streamx);
    //
    __hw_leave_interrupt();
    //
@@ -395,7 +434,7 @@ int uart_get_char(const _Uart_Descriptor *Uart)
   if ((*Uart->Ctrl)->DmaBufSize) 
     NVIC_DisableIRQ(Uart->DMAx_IRQn);
   else 
-    USART_ITConfig(Uart->UARTx, USART_IT_RXNE, DISABLE);
+    uart_it_config(Uart->UARTx, USART_CR1_RXNEIE, 0);
   //
   data = (*Uart->Ctrl)->RxBufPtr[(*Uart->Ctrl)->RxiGet++];
   (*Uart->Ctrl)->RxCnt--;
@@ -409,7 +448,7 @@ int uart_get_char(const _Uart_Descriptor *Uart)
   if ((*Uart->Ctrl)->DmaBufSize) 
     NVIC_EnableIRQ(Uart->DMAx_IRQn);
   else 
-    USART_ITConfig(Uart->UARTx, USART_IT_RXNE, ENABLE);
+    uart_it_config(Uart->UARTx, USART_CR1_RXNEIE, 1);
   
   return((int)data);
 }
@@ -504,7 +543,7 @@ int uart_write(const void *RdPtr, u16 Size, const _Uart_Descriptor *Uart)
      Size=(*Uart->Ctrl)->TxBufSize;
 
   //
-  USART_ITConfig(Uart->UARTx, USART_IT_TXE, DISABLE);
+  uart_it_config(Uart->UARTx, USART_CR1_TXEIE, 0);
   //
   for (i = 0 ; i < Size ; i++){ 
     if (uart_put_char(*ptr++, Uart) == -1) 
@@ -514,7 +553,7 @@ int uart_write(const void *RdPtr, u16 Size, const _Uart_Descriptor *Uart)
   if ((*Uart->Ctrl)->HwCtrl & UART_HALF_DUPLEX) 
     uart_tx_enable(Uart);
   //
-  USART_ITConfig(Uart->UARTx, USART_IT_TXE, ENABLE);
+  uart_it_config(Uart->UARTx, USART_CR1_TXEIE, 1);
   //
   return((int)(i));
 }
@@ -539,7 +578,7 @@ int uart_flush_rx(const _Uart_Descriptor *Uart)
   if ((*Uart->Ctrl)->DmaBufSize) 
     NVIC_DisableIRQ(Uart->DMAx_IRQn);
   else 
-    USART_ITConfig(Uart->UARTx, USART_IT_RXNE, DISABLE);
+    uart_it_config(Uart->UARTx, USART_CR1_RXNEIE, 0);
   //
   (*Uart->Ctrl)->RxCnt=0;
   //
@@ -551,7 +590,7 @@ int uart_flush_rx(const _Uart_Descriptor *Uart)
   if ((*Uart->Ctrl)->DmaBufSize) 
     NVIC_EnableIRQ(Uart->DMAx_IRQn);
   else 
-    USART_ITConfig(Uart->UARTx, USART_IT_RXNE, ENABLE);
+    uart_it_config(Uart->UARTx, USART_CR1_RXNEIE, 1);
   
   return 0;
 }

@@ -32,19 +32,26 @@ either the MPL or the [eCos GPL] License."
 
 /* Includes ------------------------------------------------------------------*/
 /* Exported define -----------------------------------------------------------*/
-#define DMA_IT_ALL_0  (DMA_IT_FEIF0 | DMA_IT_DMEIF0 | DMA_IT_TEIF0 | DMA_IT_HTIF0 | DMA_IT_TCIF0)
-#define DMA_IT_ALL_1  (DMA_IT_FEIF1 | DMA_IT_DMEIF1 | DMA_IT_TEIF1 | DMA_IT_HTIF1 | DMA_IT_TCIF1)
-#define DMA_IT_ALL_2  (DMA_IT_FEIF2 | DMA_IT_DMEIF2 | DMA_IT_TEIF2 | DMA_IT_HTIF2 | DMA_IT_TCIF2)
-#define DMA_IT_ALL_3  (DMA_IT_FEIF3 | DMA_IT_DMEIF3 | DMA_IT_TEIF3 | DMA_IT_HTIF3 | DMA_IT_TCIF3)
-#define DMA_IT_ALL_4  (DMA_IT_FEIF4 | DMA_IT_DMEIF4 | DMA_IT_TEIF4 | DMA_IT_HTIF4 | DMA_IT_TCIF4)
-#define DMA_IT_ALL_5  (DMA_IT_FEIF5 | DMA_IT_DMEIF5 | DMA_IT_TEIF5 | DMA_IT_HTIF5 | DMA_IT_TCIF5)
-#define DMA_IT_ALL_6  (DMA_IT_FEIF6 | DMA_IT_DMEIF6 | DMA_IT_TEIF6 | DMA_IT_HTIF6 | DMA_IT_TCIF6)
-#define DMA_IT_ALL_7  (DMA_IT_FEIF7 | DMA_IT_DMEIF7 | DMA_IT_TEIF7 | DMA_IT_HTIF7 | DMA_IT_TCIF7)
+/* Indicateurs d'un flux (FEIF, DMEIF, TEIF, HTIF, TCIF : 0x3D) dans LIFCR (flux 0-3) ou HIFCR
+   (flux 4-7), decales de 0, 6, 16 ou 22 bits (RM0090 10.5.3-4) ; registres CMSIS, sans SPL ni
+   HAL (ENV-35). Flux : DMAy_Streamx = DMAy_BASE + 0x10 + 0x18 * x. */
+#define DMA_STREAM_FLAGS_ALL  0x3Du
 
 /* Exported types ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
 /* Exported macro ------------------------------------------------------------*/
-#define dma_startup_init()  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_DMA1 | RCC_AHB1Periph_DMA2, ENABLE)
+#define dma_startup_init()  (RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMA2EN)
+
+/* efface tous les indicateurs d'interruption du flux (equivalent de DMA_ClearITPendingBit de la
+   SPL avec tous les indicateurs du flux) */
+static __inline void dma_stream_clear_flags(DMA_Stream_TypeDef *Stream)
+{
+  static const unsigned char shift[4] = {0, 6, 16, 22};
+  DMA_TypeDef *dma = (DMA_TypeDef *)((uint32_t)Stream & ~(uint32_t)0x3FF);
+  uint32_t x = (((uint32_t)Stream & 0x3FFu) - 0x10u) / 0x18u;
+  if (x < 4u) dma->LIFCR = DMA_STREAM_FLAGS_ALL << shift[x];
+  else dma->HIFCR = DMA_STREAM_FLAGS_ALL << shift[x - 4u];
+}
 
 /* Exported variables --------------------------------------------------------*/
 /* Exported functions --------------------------------------------------------*/
