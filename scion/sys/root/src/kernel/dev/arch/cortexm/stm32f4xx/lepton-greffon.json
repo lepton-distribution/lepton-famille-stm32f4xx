@@ -2,7 +2,7 @@
   "nom": "stm32f4xx",
   "type": "famille",
   "version": "1.0.0",
-  "description": "Famille STM32F4 : couche Lepton (GPIO sur la HAL, USART et DMA par registres, Ethernet dev_stm32f4xx_eth_x sur la HAL ETH, tick de la HAL), HAL ST v1.8.5 (hal_driver) et CMSIS device ST 3c77349 (cmsis-5), importés de STM32CubeF4 v1.28.3 avec leur provenance ; table de vecteurs du STM32F429/F439. Seuls les fichiers listés dans sources sont compilés ; stm32f4xx_hal_conf.h est fourni par le BSP. La SPL ST (driverlib), eth.c et dev_stm32f4xx_eth.c restent dans l'arbre, non compilés (ENV-35).",
+  "description": "Famille STM32F4 : couche Lepton (GPIO sur la HAL, USART et DMA par registres, Ethernet dev_stm32f4xx_eth_x sur la HAL ETH, tick de la HAL), HAL ST v1.8.5 (hal_driver) et CMSIS device ST 3c77349 (cmsis-5) de STM32CubeF4 v1.28.3, projetés par scion depuis les miroirs lepton-distribution/mirror-* (scion/.scion/, scion >= 0.6.1.0), provenance dans LEPTON-PROVENANCE.md ; table de vecteurs du STM32F429/F439. Seuls les fichiers listés dans sources sont compilés ; stm32f4xx_hal_conf.h est fourni par le BSP. La SPL ST (driverlib), eth.c et dev_stm32f4xx_eth.c restent dans l'arbre, non compilés (ENV-35).",
   "destination": "kernel/dev/arch/cortexm/stm32f4xx",
   "bibliotheque": "kernel",
   "sources": [
